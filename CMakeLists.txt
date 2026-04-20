@@ -121,21 +121,6 @@ if(ANDROID)
     target_compile_definitions(${TARGET_NAME} PRIVATE ${HYMO_COMPILE_DEFINITIONS})
     target_link_options(${TARGET_NAME} PRIVATE ${HYMO_LINK_OPTIONS})
 
-    # Optional: UPX binary compression (--best --lzma)
-    option(HYMOD_UPX "Use UPX to compress hymod binary" OFF)
-    if(HYMOD_UPX)
-        find_program(UPX_PROGRAM upx)
-        if(UPX_PROGRAM)
-            add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
-                COMMAND ${UPX_PROGRAM} --best --lzma $<TARGET_FILE:${TARGET_NAME}>
-                COMMENT "UPX: compressing ${TARGET_NAME} with LZMA (--best)..."
-            )
-            message(STATUS "UPX compression ENABLED (--best --lzma)")
-        else()
-            message(WARNING "HYMOD_UPX=ON but upx not found in PATH; skipping UPX compression")
-        endif()
-    endif()
-
     # Show binary size
     add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E echo "✅ ${ANDROID_ABI}: " && du -h "$<TARGET_FILE:${TARGET_NAME}>" | cut -f1
@@ -146,18 +131,9 @@ endif()
 # WebUI target
 if(BUILD_WEBUI)
     add_custom_target(webui
-        COMMAND ${CMAKE_COMMAND} -E echo "🎨 Building WebUI..."
-        COMMAND npm install
-        COMMAND npm run build
-        COMMAND ${CMAKE_COMMAND} -E echo "Cleaning old webroot..."
-        COMMAND ${CMAKE_COMMAND} -E remove_directory "${CMAKE_SOURCE_DIR}/module/webroot"
-        COMMAND ${CMAKE_COMMAND} -E echo "Creating webroot..."
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_SOURCE_DIR}/module/webroot"
-        COMMAND ${CMAKE_COMMAND} -E echo "Copying files..."
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/webui/dist" "${CMAKE_SOURCE_DIR}/module/webroot"
-        COMMAND ${CMAKE_COMMAND} -E echo "✅ WebUI built to module/webroot"
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/webui"
-        COMMENT "Building WebUI with npm"
+        COMMAND ${CMAKE_COMMAND} -E echo "🎨 Using static WebUI from module/webroot"
+        COMMAND ${CMAKE_COMMAND} -E echo "✅ No frontend build step is required"
+        COMMENT "Preparing static WebUI"
         VERBATIM
     )
 endif()
@@ -198,4 +174,3 @@ add_custom_target(testzip
     VERBATIM
 )
 endif()
-

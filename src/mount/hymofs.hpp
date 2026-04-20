@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 #include "defs.hpp"
 #include "hymo_magic.h"
 
@@ -32,12 +34,33 @@ public:
 
     // Debug & Stealth
     static std::string get_active_rules();
+    static std::string get_hooks();
     static bool set_debug(bool enable);
     static bool set_stealth(bool enable);
     static bool set_enabled(bool enable);
+    static bool add_spoof_kstat(const hymo_spoof_kstat& rule);
+    static bool update_spoof_kstat(const hymo_spoof_kstat& rule);
     static bool set_uname(const std::string& release, const std::string& version);
+    static bool set_cmdline(const std::string& cmdline);
+    static bool set_hide_uids(const std::vector<std::uint32_t>& uids);
     static bool fix_mounts();
     static bool hide_overlay_xattrs(const std::string& path);
+
+    // /proc/pid/maps spoof (hymo_maps): add rule or clear all
+    static int get_features();  // bitmask (HYMO_FEATURE_*) or -1 on error
+    static bool set_mount_hide(bool enable);
+    static bool set_maps_spoof(bool enable);
+    static bool set_statfs_spoof(bool enable);
+    static bool add_maps_rule(unsigned long target_ino, unsigned long target_dev,
+                              unsigned long spoofed_ino, unsigned long spoofed_dev,
+                              const std::string& spoofed_pathname);
+    static bool clear_maps_rules();
+
+    // Release cached anon-fd/session so module refs can drain before unload.
+    static void release_connection();
+
+    // Invalidate status cache so next check_status() re-queries (e.g. after LKM load).
+    static void invalidate_status_cache();
 };
 
 }  // namespace hymo

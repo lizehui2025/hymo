@@ -132,10 +132,6 @@ build_arch() {
     local ARCH=$1
     local EXTRA_ARGS=$2
     local BUILD_SUBDIR="${BUILD_DIR}/${ARCH}"
-    local UPX_ARG=""
-    if command -v upx &>/dev/null && [ -z "${NO_UPX:-}" ]; then
-        UPX_ARG="-DHYMOD_UPX=ON"
-    fi
 
     print_info "Building for ${ARCH}..."
     
@@ -209,31 +205,12 @@ download_fonts() {
 # WebUI Builder
 build_webui() {
     if [[ $NO_WEBUI -eq 0 ]]; then
-        download_fonts
-        print_info "Building WebUI..."
-        mkdir -p "${BUILD_DIR}/webui_build"
-        
-        # Check if Node.js is installed
-        if ! command -v npm &> /dev/null; then
-            print_warning "Node.js/npm not found. Skipping WebUI build."
-            if [ "$OS_TYPE" = "macos" ]; then
-                print_info "Install with: brew install node"
-            else
-                print_info "Install Node.js from your package manager"
-            fi
-            return
+        print_info "Preparing static WebUI..."
+        if [[ ! -f "${PROJECT_ROOT}/module/webroot/index.html" ]]; then
+            print_error "module/webroot/index.html not found"
+            return 1
         fi
-        
-        cmake -B "${BUILD_DIR}/webui_build" \
-            -G Ninja \
-            -DBUILD_WEBUI=ON \
-            -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK}/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI="arm64-v8a" \
-            -DANDROID_PLATFORM=android-30 \
-            "${PROJECT_ROOT}" > /dev/null
-        
-        cmake --build "${BUILD_DIR}/webui_build" --target webui
-        print_success "WebUI built"
+        print_success "Static WebUI ready in module/webroot"
     fi
 }
 
@@ -296,22 +273,20 @@ case $COMMAND in
             print_info "Using hymod binaries from CI artifacts (matrix parallel build)"
 
             mkdir -p "${OUT_DIR}"
-            for arch in arm64-v8a armeabi-v7a x86_64; do
-                bin="hymod-${arch}"
+                bin="hymod-arm64-v8a"
                 if [ -f "${OUT_DIR}/${bin}" ]; then
                     :
-                elif [ -f "hymod-${arch}/build/out/${bin}" ]; then
-                    cp -f "hymod-${arch}/build/out/${bin}" "${OUT_DIR}/"
+                elif [ -f "hymod-arm64-v8a/build/out/${bin}" ]; then
+                    cp -f "hymod-arm64-v8a/build/out/${bin}" "${OUT_DIR}/"
                 elif [ -f "build/out/${bin}" ]; then
                     cp -f "build/out/${bin}" "${OUT_DIR}/"
                 else
                     src=$(find . -name "$bin" -type f 2>/dev/null | head -1)
                     [ -n "$src" ] && cp -f "$src" "${OUT_DIR}/"
                 fi
-            done
             count=$(ls "${OUT_DIR}"/hymod-* 2>/dev/null | wc -l)
-            if [ "${count:-0}" -lt 3 ]; then
-                print_error "Expected 3 hymod binaries in build/out, found ${count:-0}"
+            if [ "${count:-0}" -lt 1 ]; then
+                print_error "Expected 1 hymod binary in build/out, found ${count:-0}"
                 ls -la "${OUT_DIR}"/ 2>/dev/null || true
                 exit 1
             fi

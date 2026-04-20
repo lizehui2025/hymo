@@ -3,6 +3,9 @@ import { PATHS, DEFAULT_CONFIG, type Config, type Module, type StorageInfo, type
 const isDev = import.meta.env.DEV
 let ksuExec: ((cmd: string) => Promise<{ errno: number; stdout: string; stderr: string }>) | null = null
 
+// API JSON to stdout (KernelSU exec may not capture stderr); fallback to stderr
+const apiOutput = (r: { stdout: string; stderr: string }) => (r.stdout || r.stderr || '').trim()
+
 // Initialize KernelSU API
 async function initKernelSU() {
   if (ksuExec !== null) return ksuExec
@@ -24,7 +27,12 @@ const shouldUseMock = isDev
 
 const mockApi = {
   async loadConfig(): Promise<Config> {
-    return { ...DEFAULT_CONFIG, partitions: ['system', 'vendor'], hymofs_available: true }
+    return {
+      ...DEFAULT_CONFIG,
+      partitions: ['system', 'vendor'],
+      hymofs_available: true,
+      cmdline_value: 'androidboot.verifiedbootstate=green'
+    }
   },
 
   async saveConfig(_config: Config): Promise<void> {
@@ -92,6 +100,13 @@ const mockApi = {
       mountBase: '/dev/hymofs',
       hymofsModules: ['example_module'],
       hymofsMismatch: false,
+      hymofsAvailable: true,
+      hymofsStatus: 0,
+      hooks: 'GET_FD: tracepoint (sys_enter/sys_exit)\npath: tracepoint (sys_enter)\nvfs_getattr,d_path,iterate_dir,vfs_getxattr: ftrace+kretprobe\nuname: kretprobe\ncmdline: tracepoint (sys_enter/sys_exit)',
+      features: {
+        bitmask: 0x1e7,
+        names: ['mount_hide', 'maps_spoof', 'statfs_spoof', 'cmdline_spoof', 'uname_spoof', 'kstat_spoof', 'merge_dir']
+      },
       mountStats: {
         total_mounts: 45,
         successful_mounts: 44,
@@ -139,8 +154,16 @@ const mockApi = {
     console.log('[Mock] Remove hide rule:', _path)
   },
 
-  async getLkmStatus(): Promise<{ loaded: boolean; autoload: boolean }> {
-    return { loaded: true, autoload: true }
+  async getLkmStatus(): Promise<{ loaded: boolean; autoload: boolean; kmi_override?: string }> {
+    return { loaded: true, autoload: true, kmi_override: '' }
+  },
+
+  async lkmSetKmi(_kmi: string): Promise<void> {
+    console.log('[Mock] LKM set KMI')
+  },
+
+  async lkmClearKmi(): Promise<void> {
+    console.log('[Mock] LKM clear KMI')
   },
 
   async lkmLoad(): Promise<void> {
@@ -171,9 +194,11 @@ const realApi = {
     
     const cmd = `${PATHS.BINARY} config show`
     try {
-      const { errno, stdout } = await ksuExec!(cmd)
-      if (errno === 0 && stdout) {
-        return JSON.parse(stdout)
+      const res = await ksuExec!(cmd)
+      const out = apiOutput(res)
+      if (res.errno === 0 && out) {
+        const parsed = JSON.parse(out) as Record<string, unknown>
+        return { ...DEFAULT_CONFIG, ...parsed } as Config
       }
       return DEFAULT_CONFIG
     } catch (e) {
@@ -199,10 +224,11 @@ const realApi = {
       ignore_protocol_mismatch: config.ignore_protocol_mismatch,
       enable_kernel_debug: config.enable_kernel_debug,
       enable_stealth: config.enable_stealth,
+      enable_hidexattr: config.enable_hidexattr ?? false,
       hymofs_enabled: config.hymofs_enabled,
       uname_release: config.uname_release,
       uname_version: config.uname_version,
-      mount_stage: config.mount_stage,
+      cmdline_value: config.cmdline_value,
       partitions: config.partitions,
     }
     const data = JSON.stringify(configToSave, null, 2).replace(/'/g, "'\\''")
@@ -215,12 +241,24 @@ const realApi = {
     await ksuExec!(`${PATHS.BINARY} debug stealth ${config.enable_stealth ? 'enable' : 'disable'}`)
     if (config.hymofs_available) {
       await ksuExec!(`${PATHS.BINARY} hymofs ${config.hymofs_enabled ? 'enable' : 'disable'}`)
+      const hideOn = config.enable_hidexattr ? 'on' : 'off'
+      await ksuExec!(`${PATHS.BINARY} hymofs mount-hide ${hideOn}`)
+      await ksuExec!(`${PATHS.BINARY} hymofs maps-spoof ${hideOn}`)
+      await ksuExec!(`${PATHS.BINARY} hymofs statfs-spoof ${hideOn}`)
     }
     // Apply uname spoofing (always apply to ensure we can clear it)
     {
       const release = (config.uname_release || '').replace(/'/g, "'\\''")
       const version = (config.uname_version || '').replace(/'/g, "'\\''")
       await ksuExec!(`${PATHS.BINARY} debug set-uname '${release}' '${version}'`)
+    }
+    {
+      const cmdline = (config.cmdline_value || '').replace(/'/g, "'\\''")
+      if (config.cmdline_value) {
+        await ksuExec!(`${PATHS.BINARY} debug set-cmdline '${cmdline}'`)
+      } else {
+        await ksuExec!(`${PATHS.BINARY} debug clear-cmdline`)
+      }
     }
   },
 
@@ -230,9 +268,10 @@ const realApi = {
     
     const cmd = `${PATHS.BINARY} module list`
     try {
-      const { errno, stdout } = await ksuExec!(cmd)
-      if (errno === 0 && stdout) {
-        const data = JSON.parse(stdout)
+      const res = await ksuExec!(cmd)
+      const out = apiOutput(res)
+      if (res.errno === 0 && out) {
+        const data = JSON.parse(out)
         const modules = data.modules || data || []
         return modules.map((m: any) => ({
           id: m.id,
@@ -275,9 +314,10 @@ const realApi = {
     
     const cmd = `${PATHS.BINARY} module check-conflicts`
     try {
-      const { errno, stdout } = await ksuExec!(cmd)
-      if (errno === 0 && stdout) {
-        return JSON.parse(stdout)
+      const res = await ksuExec!(cmd)
+      const out = apiOutput(res)
+      if (res.errno === 0 && out) {
+        return JSON.parse(out)
       }
     } catch (e) {
       console.error('Check conflicts failed:', e)
@@ -363,10 +403,11 @@ const realApi = {
     
     try {
       const cmd = `${PATHS.BINARY} api storage`
-      const { errno, stdout } = await ksuExec!(cmd)
+      const { errno, stdout, stderr } = await ksuExec!(cmd)
+      const out = apiOutput({ stdout, stderr })
       
-      if (errno === 0 && stdout) {
-        const data = JSON.parse(stdout)
+      if (errno === 0 && out) {
+        const data = JSON.parse(out)
         
         // Handle "Not mounted" error or valid stats
         if (data.error) {
@@ -451,8 +492,8 @@ const realApi = {
       const cmdSystem = `${PATHS.BINARY} api system`
       let systemData: any = {}
       try {
-        const { stdout: outSystem } = await ksuExec!(cmdSystem)
-        systemData = JSON.parse(outSystem || '{}')
+        const res = await ksuExec!(cmdSystem)
+        systemData = JSON.parse(apiOutput(res) || '{}')
         console.log('[SystemInfo] api system output:', systemData)
       } catch (e) { 
         console.warn('Failed to get system info', e) 
@@ -462,8 +503,8 @@ const realApi = {
       const cmdMount = `${PATHS.BINARY} hymofs version`
       let mountData: any = {}
       try {
-        const { stdout: outMount } = await ksuExec!(cmdMount)
-        mountData = JSON.parse(outMount || '{}')
+        const res = await ksuExec!(cmdMount)
+        mountData = JSON.parse(apiOutput(res) || '{}')
         console.log('[SystemInfo] hymofs version output:', mountData)
       } catch (e) { 
         console.warn('Failed to get mount info', e) 
@@ -475,9 +516,13 @@ const realApi = {
         mountBase: systemData.mount_base || mountData.mount_base || '/dev/hymo_mirror',
         unameRelease,
         unameVersion,
+        hymofsAvailable: systemData.hymofs_available,
+        hymofsStatus: systemData.hymofs_status,
         hymofsModules: mountData.active_modules || [],
         hymofsMismatch: mountData.protocol_mismatch || false,
         mismatchMessage: mountData.mismatch_message,
+        hooks: systemData.hooks || mountData.hooks || '',
+        features: systemData.features,
         mountStats: systemData.mountStats,
         detectedPartitions: systemData.detectedPartitions,
       }
@@ -517,17 +562,18 @@ const realApi = {
     
     try {
       const cmd = `${PATHS.BINARY} hide list`
-      const { errno, stdout } = await ksuExec!(cmd)
+      const { errno, stdout, stderr } = await ksuExec!(cmd)
+      const out = apiOutput({ stdout, stderr })
       
-      if (errno === 0 && stdout) {
+      if (errno === 0 && out) {
         try {
-          const rules = JSON.parse(stdout)
+          const rules = JSON.parse(out)
           if (Array.isArray(rules)) {
             return rules
           }
         } catch (e) {
           // Fallback
-          return stdout
+          return out
             .split('\n')
             .map(line => line.trim())
             .filter(line => line && line.startsWith('/'))
@@ -552,10 +598,11 @@ const realApi = {
       const userSet = new Set(userRules)
       const rules: Array<{ type: string; path: string; target?: string; source?: string; isUserDefined: boolean }> = []
       
-      if (allOutput.errno === 0 && allOutput.stdout) {
+      const out = apiOutput(allOutput)
+      if (allOutput.errno === 0 && out) {
         let parsed = false
         try {
-          const data = JSON.parse(allOutput.stdout)
+          const data = JSON.parse(out)
           if (Array.isArray(data)) {
             parsed = true
             data.forEach((rule: any) => {
@@ -576,7 +623,7 @@ const realApi = {
 
         if (!parsed) {
           // Parse legacy format (line-based)
-          const lines = allOutput.stdout.split('\n')
+          const lines = out.split('\n')
           for (const line of lines) {
             const trimmed = line.trim()
             if (!trimmed) continue
@@ -644,24 +691,49 @@ const realApi = {
     }
   },
 
-  async getLkmStatus(): Promise<{ loaded: boolean; autoload: boolean }> {
+  async getLkmStatus(): Promise<{ loaded: boolean; autoload: boolean; kmi_override?: string }> {
     await initKernelSU()
     if (!ksuExec) return { loaded: false, autoload: true }
     
     try {
       const cmd = `${PATHS.BINARY} api lkm`
-      const { errno, stdout } = await ksuExec!(cmd)
-      if (errno === 0 && stdout) {
-        const data = JSON.parse(stdout)
+      const res = await ksuExec!(cmd)
+      const out = apiOutput(res)
+      if (res.errno === 0 && out) {
+        const data = JSON.parse(out)
         return {
           loaded: data.loaded === true,
           autoload: data.autoload !== false,
+          kmi_override: data.kmi_override || '',
         }
       }
     } catch (e) {
       console.error('Failed to get LKM status:', e)
     }
     return { loaded: false, autoload: true }
+  },
+
+  async lkmSetKmi(kmi: string): Promise<void> {
+    await initKernelSU()
+    if (!ksuExec) throw new Error('KernelSU not available')
+    
+    const escaped = kmi.replace(/'/g, "'\\''")
+    const cmd = `${PATHS.BINARY} lkm set-kmi '${escaped}'`
+    const { errno, stderr } = await ksuExec!(cmd)
+    if (errno !== 0) {
+      throw new Error(stderr || 'Failed to set KMI override')
+    }
+  },
+
+  async lkmClearKmi(): Promise<void> {
+    await initKernelSU()
+    if (!ksuExec) throw new Error('KernelSU not available')
+    
+    const cmd = `${PATHS.BINARY} lkm clear-kmi`
+    const { errno, stderr } = await ksuExec!(cmd)
+    if (errno !== 0) {
+      throw new Error(stderr || 'Failed to clear KMI override')
+    }
   },
 
   async lkmLoad(): Promise<void> {

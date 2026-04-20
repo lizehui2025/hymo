@@ -19,10 +19,11 @@ export const DEFAULT_CONFIG = {
   ignore_protocol_mismatch: false,
   enable_kernel_debug: false,
   enable_stealth: true,
+  enable_hidexattr: false,
   hymofs_enabled: true,
   uname_release: '',
   uname_version: '',
-  mount_stage: 'metamount',
+  cmdline_value: '',
   partitions: [] as string[],
   hymofs_available: false,
   tmpfs_xattr_supported: false,
@@ -67,11 +68,20 @@ export type SystemInfo = {
   mountBase: string
   unameRelease?: string
   unameVersion?: string
+  hymofsAvailable?: boolean
+  hymofsStatus?: number
   hymofsModules?: string[]
   hymofsMismatch?: boolean
   mismatchMessage?: string
+  hooks?: string
+  features?: HymoFeatures
   mountStats?: MountStatistics
   detectedPartitions?: PartitionInfo[]
+}
+
+export type HymoFeatures = {
+  bitmask: number
+  names: string[]
 }
 
 export type MountStatistics = {

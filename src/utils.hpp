@@ -2,6 +2,7 @@
 #pragma once
 
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 
@@ -13,7 +14,8 @@ namespace hymo {
 class Logger {
 public:
     static Logger& getInstance();
-    void init(bool debug, bool verbose, const fs::path& log_path);
+    void init(bool debug, bool verbose);
+    void init(bool debug, bool verbose, const char* log_path);  // YukiSU: write to file
     void log(const std::string& level, const std::string& message);
 
 private:

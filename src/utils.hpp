@@ -36,7 +36,6 @@ bool ensure_dir_exists(const fs::path& path);
 bool is_xattr_supported(const fs::path& path);
 bool lsetfilecon(const fs::path& path, const std::string& context);
 std::string lgetfilecon(const fs::path& path);
-std::string get_context_for_path(const fs::path& path);
 bool copy_path_context(const fs::path& src, const fs::path& dst);
 
 bool mount_tmpfs(const fs::path& target, const char* source = nullptr);

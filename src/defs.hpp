@@ -39,7 +39,6 @@ constexpr const char* KSU_OVERLAY_SOURCE = OVERLAY_SOURCE;
 constexpr const char* REPLACE_DIR_XATTR = "trusted.overlay.opaque";
 constexpr const char* SELINUX_XATTR = "security.selinux";
 constexpr const char* DEFAULT_SELINUX_CONTEXT = "u:object_r:system_file:s0";
-constexpr const char* VENDOR_SELINUX_CONTEXT = "u:object_r:vendor_file:s0";
 
 // Standard Android partitions
 const std::vector<std::string> BUILTIN_PARTITIONS = {"system",     "vendor", "product",

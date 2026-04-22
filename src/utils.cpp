@@ -122,17 +122,10 @@ std::string get_context_for_path(const fs::path& path) {
 }
 
 bool copy_path_context(const fs::path& src, const fs::path& dst) {
-    std::string context;
-    if (fs::exists(src)) {
-        context = lgetfilecon(src);
-        // Fix rootfs context
-        if (context.find("u:object_r:rootfs:s0") != std::string::npos) {
-            context = get_context_for_path(dst);
-        }
-    } else {
-        context = get_context_for_path(dst);
+    if (fs::exists(src) {
+        return lsetfilecon(dst, lgetfilecon(src)); 
     }
-    return lsetfilecon(dst, context);
+    return false;
 }
 
 bool is_xattr_supported(const fs::path& path) {
@@ -417,7 +410,7 @@ static bool native_cp_r(const fs::path& src, const fs::path& dst) {
         if (!fs::exists(dst)) {
             fs::create_directories(dst);
             fs::permissions(dst, fs::status(src).permissions());
-            lsetfilecon(dst, get_context_for_path(dst));
+            copy_path_context(src, dst);
         }
 
         int count = 0;
@@ -436,11 +429,11 @@ static bool native_cp_r(const fs::path& src, const fs::path& dst) {
                     fs::remove(dst_path);
                 }
                 fs::create_symlink(link_target, dst_path);
-                lsetfilecon(dst_path, get_context_for_path(dst_path));
+                copy_path_context(entry.path(), dst_path);
             } else {
                 fs::copy_file(entry.path(), dst_path, fs::copy_options::overwrite_existing);
                 fs::permissions(dst_path, fs::status(entry.path()).permissions());
-                lsetfilecon(dst_path, get_context_for_path(dst_path));
+                copy_path_context(entry.path(), dst_path);
             }
         }
 

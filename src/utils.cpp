@@ -111,18 +111,8 @@ std::string lgetfilecon(const fs::path& path) {
     return DEFAULT_SELINUX_CONTEXT;
 }
 
-// Get appropriate SELinux context based on path
-// /vendor and /odm paths should use vendor_file context
-std::string get_context_for_path(const fs::path& path) {
-    std::string path_str = path.string();
-    if (path_str.find("/vendor") == 0 || path_str.find("/odm") == 0) {
-        return VENDOR_SELINUX_CONTEXT;
-    }
-    return DEFAULT_SELINUX_CONTEXT;
-}
-
 bool copy_path_context(const fs::path& src, const fs::path& dst) {
-    if (fs::exists(src) {
+    if (fs::exists(src) ){
         return lsetfilecon(dst, lgetfilecon(src)); 
     }
     return false;

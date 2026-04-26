@@ -3,6 +3,7 @@ project(Hymo VERSION 1.0.0 LANGUAGES C CXX)
 
 # Options
 option(BUILD_WEBUI "Build WebUI before compiling" ON)
+option(HYMO_DEBUG_RELEASE "Build debug release variant with tracing and symbols" OFF)
 
 # Read version from module.prop
 file(READ "${CMAKE_SOURCE_DIR}/module/module.prop" MODULE_PROP_CONTENT)
@@ -68,48 +69,71 @@ set(HYMO_SOURCES
     src/mount/partition_utils.cpp
 )
 
-# Size optimization
+# Compile options
 set(HYMO_COMPILE_OPTIONS
-    -Oz
-    -DNDEBUG
     -Wall
     -Wextra
     -Wno-unused-parameter
     -fPIE
-    -ffunction-sections
-    -fdata-sections
-    -flto=full
-    -fvisibility=hidden
-    -fvisibility-inlines-hidden
     -fno-rtti
-    -fno-asynchronous-unwind-tables
-    -fmerge-all-constants
-    -fno-ident
-    -faddrsig
-    -fno-semantic-interposition
 )
+
+if(HYMO_DEBUG_RELEASE)
+    list(APPEND HYMO_COMPILE_OPTIONS
+        -O0
+        -g3
+        -fno-omit-frame-pointer
+    )
+else()
+    list(APPEND HYMO_COMPILE_OPTIONS
+        -Oz
+        -DNDEBUG
+        -ffunction-sections
+        -fdata-sections
+        -flto=full
+        -fvisibility=hidden
+        -fvisibility-inlines-hidden
+        -fno-asynchronous-unwind-tables
+        -fmerge-all-constants
+        -fno-ident
+        -faddrsig
+        -fno-semantic-interposition
+    )
+endif()
 
 set(HYMO_COMPILE_DEFINITIONS
     __ANDROID__
 )
+if(HYMO_DEBUG_RELEASE)
+    list(APPEND HYMO_COMPILE_DEFINITIONS HYMO_DEBUG_RELEASE)
+endif()
 
 set(HYMO_LINK_OPTIONS
     -static-libstdc++
     -static-libgcc
     -pie
     -fuse-ld=lld
-    -flto=full
-    -Wl,--gc-sections
-    -Wl,--icf=all
-    -Wl,--strip-all
-    -Wl,--exclude-libs,ALL
-    -Wl,-O2
-    -Wl,--lto-O3
-    -Wl,--hash-style=gnu
-    -Wl,--build-id=none
-    -Wl,-z,norelro
     -lz
 )
+
+if(HYMO_DEBUG_RELEASE)
+    list(APPEND HYMO_LINK_OPTIONS
+        -Wl,--hash-style=gnu
+    )
+else()
+    list(APPEND HYMO_LINK_OPTIONS
+        -flto=full
+        -Wl,--gc-sections
+        -Wl,--icf=all
+        -Wl,--strip-all
+        -Wl,--exclude-libs,ALL
+        -Wl,-O2
+        -Wl,--lto-O3
+        -Wl,--hash-style=gnu
+        -Wl,--build-id=none
+        -Wl,-z,norelro
+    )
+endif()
 
 # Check if we are cross compiling for Android
 if(ANDROID)

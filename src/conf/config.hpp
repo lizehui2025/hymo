@@ -10,6 +10,20 @@ namespace fs = std::filesystem;
 
 namespace hymo {
 
+#ifdef HYMO_DEBUG_RELEASE
+constexpr bool DEFAULT_DEBUG_ENABLED = true;
+constexpr bool DEFAULT_VERBOSE_ENABLED = true;
+constexpr bool DEFAULT_TRACE_STEPS = true;
+constexpr bool DEFAULT_TRACE_PARAMS = true;
+constexpr bool DEFAULT_FORCE_FSYNC = true;
+#else
+constexpr bool DEFAULT_DEBUG_ENABLED = false;
+constexpr bool DEFAULT_VERBOSE_ENABLED = false;
+constexpr bool DEFAULT_TRACE_STEPS = false;
+constexpr bool DEFAULT_TRACE_PARAMS = false;
+constexpr bool DEFAULT_FORCE_FSYNC = false;
+#endif
+
 struct ModuleRuleConfig {
     std::string path;
     std::string mode;
@@ -47,8 +61,13 @@ struct Config {
     fs::path tempdir;
     std::string mountsource = "KSU";  // KernelSU CRITICAL: mount source/device name for overlay &
                                       // tmpfs so KernelSU can identify/manage mounts
-    bool debug = false;
-    bool verbose = false;
+    bool debug = DEFAULT_DEBUG_ENABLED;
+    bool verbose = DEFAULT_VERBOSE_ENABLED;
+    bool trace_steps = DEFAULT_TRACE_STEPS;
+    bool trace_params = DEFAULT_TRACE_PARAMS;
+    bool log_force_fsync = DEFAULT_FORCE_FSYNC;
+    int log_rotate_mb = 16;
+    int log_rotate_keep = 8;
     FilesystemType fs_type = FilesystemType::AUTO;
     bool disable_umount = false;
     bool enable_nuke = true;

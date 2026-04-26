@@ -1,5 +1,6 @@
 // conf/config.cpp - Configuration implementation
 #include "config.hpp"
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -49,6 +50,17 @@ Config Config::from_file(const fs::path& path) {
                 config.debug = o.at("debug").as_bool();
             if (o.count("verbose"))
                 config.verbose = o.at("verbose").as_bool();
+            if (o.count("trace_steps"))
+                config.trace_steps = o.at("trace_steps").as_bool();
+            if (o.count("trace_params"))
+                config.trace_params = o.at("trace_params").as_bool();
+            if (o.count("log_force_fsync"))
+                config.log_force_fsync = o.at("log_force_fsync").as_bool();
+            if (o.count("log_rotate_mb"))
+                config.log_rotate_mb = std::max(1, static_cast<int>(o.at("log_rotate_mb").as_number()));
+            if (o.count("log_rotate_keep"))
+                config.log_rotate_keep =
+                    std::max(4, static_cast<int>(o.at("log_rotate_keep").as_number()));
             if (o.count("fs_type"))
                 config.fs_type = filesystem_type_from_string(o.at("fs_type").as_string());
             if (o.count("disable_umount"))
@@ -111,6 +123,11 @@ bool Config::save_to_file(const fs::path& path) const {
     root["mountsource"] = json::Value(mountsource);
     root["debug"] = json::Value(debug);
     root["verbose"] = json::Value(verbose);
+    root["trace_steps"] = json::Value(trace_steps);
+    root["trace_params"] = json::Value(trace_params);
+    root["log_force_fsync"] = json::Value(log_force_fsync);
+    root["log_rotate_mb"] = json::Value(log_rotate_mb);
+    root["log_rotate_keep"] = json::Value(log_rotate_keep);
     root["fs_type"] = json::Value(filesystem_type_to_string(fs_type));
     root["disable_umount"] = json::Value(disable_umount);
     root["enable_nuke"] = json::Value(enable_nuke);

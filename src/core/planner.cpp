@@ -93,6 +93,10 @@ static std::string resolve_path_for_hymofs(const std::string& path_str) {
 
 MountPlan generate_plan(const Config& config, const std::vector<Module>& modules,
                         const fs::path& storage_root) {
+    TraceScope scope("planner", "generate_plan",
+                     trace_kv({{"modules", std::to_string(modules.size())},
+                               {"storage_root", storage_root.string()},
+                               {"extra_partitions", std::to_string(config.partitions.size())}}));
     MountPlan plan;
 
     std::map<std::string, std::vector<fs::path>> overlay_layers;
@@ -276,6 +280,10 @@ MountPlan generate_plan(const Config& config, const std::vector<Module>& modules
     plan.magic_module_paths.assign(magic_paths.begin(), magic_paths.end());
     plan.overlay_module_ids.assign(overlay_ids.begin(), overlay_ids.end());
     plan.magic_module_ids.assign(magic_ids.begin(), magic_ids.end());
+    scope.set_result(trace_kv({{"overlay_ops", std::to_string(plan.overlay_ops.size())},
+                               {"overlay_ids", std::to_string(plan.overlay_module_ids.size())},
+                               {"magic_paths", std::to_string(plan.magic_module_paths.size())},
+                               {"hymofs_ids", std::to_string(plan.hymofs_module_ids.size())}}));
 
     return plan;
 }
@@ -288,6 +296,10 @@ struct AddRule {
 
 void update_hymofs_mappings(const Config& config, const std::vector<Module>& modules,
                             const fs::path& storage_root, MountPlan& plan) {
+    TraceScope scope("planner", "update_hymofs_mappings",
+                     trace_kv({{"modules", std::to_string(modules.size())},
+                               {"hymofs_modules", std::to_string(plan.hymofs_module_ids.size())},
+                               {"storage_root", storage_root.string()}}));
     if (!HymoFS::is_available())
         return;
 
@@ -482,6 +494,9 @@ void update_hymofs_mappings(const Config& config, const std::vector<Module>& mod
     for (const auto& path : hide_rules) {
         HymoFS::hide_path(path);
     }
+    scope.set_result(trace_kv({{"add_rules", std::to_string(add_rules.size())},
+                               {"merge_rules", std::to_string(merge_rules.size())},
+                               {"hide_rules", std::to_string(hide_rules.size())}}));
 
     // Apply user-defined hide rules
     apply_user_hide_rules();

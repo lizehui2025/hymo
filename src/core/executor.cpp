@@ -23,6 +23,11 @@ static fs::path extract_module_root(const fs::path& partition_path) {
 }
 
 ExecutionResult execute_plan(const MountPlan& plan, const Config& config, bool hymofs_active) {
+    TraceScope exec_scope("executor", "execute_plan",
+                          trace_kv({{"overlay_ops", std::to_string(plan.overlay_ops.size())},
+                                    {"magic_paths", std::to_string(plan.magic_module_paths.size())},
+                                    {"hymofs_modules", std::to_string(plan.hymofs_module_ids.size())},
+                                    {"hymofs_active", trace_bool(hymofs_active)}}));
     if (!plan.hymofs_module_ids.empty()) {
         LOG_INFO("HymoFS modules handled by Fast Path controller.");
     }
@@ -34,6 +39,9 @@ ExecutionResult execute_plan(const MountPlan& plan, const Config& config, bool h
 
     // Execute Overlay Operations
     for (const auto& op : plan.overlay_ops) {
+        TraceScope overlay_scope(
+            "executor", "overlay_mount",
+            trace_kv({{"target", op.target}, {"layers", std::to_string(op.lowerdirs.size())}}));
         std::vector<std::string> lowerdir_strings;
         for (const auto& p : op.lowerdirs) {
             lowerdir_strings.push_back(p.string());
@@ -49,6 +57,7 @@ ExecutionResult execute_plan(const MountPlan& plan, const Config& config, bool h
 
         if (!mount_overlay(op.target, lowerdir_strings, config.mountsource, std::nullopt,
                            std::nullopt, config.disable_umount, all_partitions)) {
+            overlay_scope.fail("overlay_failed");
             LOG_WARN("OverlayFS failed for " + op.target + ". Triggering fallback.");
 
             // Fallback: Add all involved modules to magic queue
@@ -84,6 +93,8 @@ ExecutionResult execute_plan(const MountPlan& plan, const Config& config, bool h
     std::vector<std::string> final_magic_ids;
 
     if (!magic_queue.empty()) {
+        TraceScope magic_scope("executor", "magic_mount",
+                               trace_kv({{"queue", std::to_string(magic_queue.size())}}));
         fs::path tempdir = select_temp_dir();
         if (!config.tempdir.empty()) {
             fs::path candidate = config.tempdir;
@@ -115,11 +126,13 @@ ExecutionResult execute_plan(const MountPlan& plan, const Config& config, bool h
         if (!ensure_temp_dir(tempdir, hymofs_active)) {
             LOG_ERROR("Magic Mount aborted: temp dir prepare failed");
             final_magic_ids.clear();
+            magic_scope.fail("ensure_temp_dir_failed");
         } else {
             if (!mount_partitions(tempdir, magic_queue, config.mountsource, config.partitions,
                                   config.disable_umount)) {
                 LOG_ERROR("Magic Mount critical failure");
                 final_magic_ids.clear();
+                magic_scope.fail("mount_partitions_failed");
             }
 
             cleanup_temp_dir(tempdir, hymofs_active);
@@ -134,6 +147,8 @@ ExecutionResult execute_plan(const MountPlan& plan, const Config& config, bool h
     std::sort(final_magic_ids.begin(), final_magic_ids.end());
     final_magic_ids.erase(std::unique(final_magic_ids.begin(), final_magic_ids.end()),
                           final_magic_ids.end());
+    exec_scope.set_result(trace_kv({{"overlay_done", std::to_string(final_overlay_ids.size())},
+                                    {"magic_done", std::to_string(final_magic_ids.size())}}));
 
     return ExecutionResult{final_overlay_ids, final_magic_ids};
 }

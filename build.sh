@@ -131,7 +131,9 @@ check_deps() {
 build_arch() {
     local ARCH=$1
     local EXTRA_ARGS=$2
-    local BUILD_SUBDIR="${BUILD_DIR}/${ARCH}"
+    local OUT_SUFFIX=${3:-""}
+    local BUILD_VARIANT=${4:-"release"}
+    local BUILD_SUBDIR="${BUILD_DIR}/${BUILD_VARIANT}-${ARCH}"
 
     print_info "Building for ${ARCH}..."
     
@@ -157,11 +159,12 @@ build_arch() {
     local BUILT_BIN="${BUILD_SUBDIR}/${BIN_NAME}"
     
     if [ -f "$BUILT_BIN" ]; then
-        cp "$BUILT_BIN" "${OUT_DIR}/"
+        local OUT_NAME="${BIN_NAME}${OUT_SUFFIX}"
+        cp "$BUILT_BIN" "${OUT_DIR}/${OUT_NAME}"
         
         # Show size
         local SIZE=$(du -h "$BUILT_BIN" | cut -f1)
-        print_success "Built ${BIN_NAME} (${SIZE})"
+        print_success "Built ${OUT_NAME} (${SIZE})"
     else
         print_error "Binary ${BIN_NAME} not found!"
         exit 1
@@ -334,6 +337,31 @@ case $COMMAND in
             ( cd "${OUT_DIR}" && T="hymo-${VERSION_TAG}-${SHORT_HASH}.zip"; for f in hymo-*.zip; do [ -f "$f" ] && [ "$f" != "$T" ] && mv "$f" "$T"; break; done )
         fi
         ;;
+    debug-package)
+        build_webui
+        build_arch "arm64-v8a" "-DHYMO_DEBUG_RELEASE=ON" "-debug" "debug"
+        build_arch "armeabi-v7a" "-DHYMO_DEBUG_RELEASE=ON" "-debug" "debug"
+        build_arch "x86_64" "-DHYMO_DEBUG_RELEASE=ON" "-debug" "debug"
+
+        print_info "Packaging debug zip..."
+        PKG_TEMP="${BUILD_DIR}/pkg_temp_debug"
+        rm -rf "${PKG_TEMP}"
+        cp -r "${PROJECT_ROOT}/module" "${PKG_TEMP}"
+        cp "${OUT_DIR}"/hymod-*-debug "${PKG_TEMP}/"
+        for arch in arm64-v8a armeabi-v7a x86_64; do
+            if [ -f "${PKG_TEMP}/hymod-${arch}-debug" ]; then
+                cp "${PKG_TEMP}/hymod-${arch}-debug" "${PKG_TEMP}/hymod-${arch}"
+            fi
+        done
+        chmod 755 "${PKG_TEMP}"/hymod-*-debug
+        chmod 755 "${PKG_TEMP}"/hymod-*
+
+        MODULE_ID=$(grep '^id=' "${PROJECT_ROOT}/module/module.prop" | cut -d= -f2)
+        MODULE_VERSION=$(grep '^version=' "${PROJECT_ROOT}/module/module.prop" | cut -d= -f2)
+        DEBUG_ZIP="${OUT_DIR}/${MODULE_ID}-${MODULE_VERSION}-debug.zip"
+        ( cd "${PKG_TEMP}" && zip -q -r "${DEBUG_ZIP}" . )
+        print_success "Debug package: ${DEBUG_ZIP}"
+        ;;
     testzip)
         build_webui
         build_arch "arm64-v8a"
@@ -345,7 +373,7 @@ case $COMMAND in
         print_success "Cleaned."
         ;;
     *)
-        echo "Usage: $0 {init|all|webui|arm64|armv7|x86_64|package|testzip|clean} [--no-webui] [--verbose]"
+        echo "Usage: $0 {init|all|webui|arm64|armv7|x86_64|package|debug-package|testzip|clean} [--no-webui] [--verbose]"
         echo ""
         echo "Commands:"
         echo "  init     - Initialize build directory"
@@ -355,6 +383,7 @@ case $COMMAND in
         echo "  armv7    - Build armeabi-v7a only"
         echo "  x86_64   - Build x86_64 only"
         echo "  package  - Build all and create flashable zip"
+        echo "  debug-package - Build debug variant and create debug flashable zip"
         echo "  testzip  - Build arm64 test zip"
         echo "  clean    - Clean build directory"
         echo ""

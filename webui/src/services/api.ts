@@ -218,6 +218,11 @@ const realApi = {
       mountsource: config.mountsource,
       debug: config.debug,
       verbose: config.verbose,
+      trace_steps: config.trace_steps,
+      trace_params: config.trace_params,
+      log_force_fsync: config.log_force_fsync,
+      log_rotate_mb: config.log_rotate_mb,
+      log_rotate_keep: config.log_rotate_keep,
       fs_type: config.fs_type,
       disable_umount: config.disable_umount,
       enable_nuke: config.enable_nuke,
@@ -390,7 +395,10 @@ const realApi = {
     }
 
     const f = logPath || DEFAULT_CONFIG.logfile
-    const cmd = `[ -f "${f}" ] && tail -n ${lines} "${f}" || echo ""`
+    const isDefaultLog = f === DEFAULT_CONFIG.logfile
+    const cmd = isDefaultLog
+      ? `LOG_BASE="${f}"; (for i in 8 7 6 5 4 3 2 1; do [ -f "$LOG_BASE.$i" ] && cat "$LOG_BASE.$i"; done; [ -f "$LOG_BASE" ] && cat "$LOG_BASE") | tail -n ${lines}`
+      : `[ -f "${f}" ] && tail -n ${lines} "${f}" || echo ""`
     const { errno, stdout, stderr } = await ksuExec!(cmd)
     
     if (errno === 0) return stdout || ''

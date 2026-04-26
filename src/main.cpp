@@ -73,6 +73,12 @@ struct LogRedirector {
 
 namespace {
 
+#ifdef HYMO_DEBUG_RELEASE
+constexpr bool kDebugReleaseBuild = true;
+#else
+constexpr bool kDebugReleaseBuild = false;
+#endif
+
 std::string json_quote(const std::string& value) {
     return json::dump(json::Value(value));
 }
@@ -301,13 +307,21 @@ int main(int argc, char** argv) {
         // Redirect clog to daemon.log (standalone: no shell redirect)
         LogRedirector log_redirector(DAEMON_LOG_FILE);
 
-        // Clear daemon.log on each boot (mount is invoked at post-fs-data)
+        Logger& logger = Logger::getInstance();
+
+        // Release build truncates boot log; debug release rotates to preserve traces.
         if (cli.command == "mount") {
-            std::ofstream(DAEMON_LOG_FILE, std::ios::trunc);
+            if (kDebugReleaseBuild) {
+                logger.rotate_logs(DAEMON_LOG_FILE, 16, 8);
+            } else {
+                std::ofstream(DAEMON_LOG_FILE, std::ios::trunc);
+            }
         }
 
-        // Initialize logger: write to daemon.log so Manager can show Hymo logs
-        Logger::getInstance().init(cli.verbose, cli.verbose, DAEMON_LOG_FILE);
+        const bool early_debug = kDebugReleaseBuild || cli.verbose;
+        const bool early_verbose = kDebugReleaseBuild || cli.verbose;
+        logger.init(early_debug, early_verbose, DAEMON_LOG_FILE, kDebugReleaseBuild,
+                    kDebugReleaseBuild, kDebugReleaseBuild);
 
         if (cli.command.empty()) {
             print_help();
@@ -378,6 +392,14 @@ int main(int argc, char** argv) {
                 std::cout << "  \"mountsource\": " << json_quote(config.mountsource) << ",\n";
                 std::cout << "  \"debug\": " << (config.debug ? "true" : "false") << ",\n";
                 std::cout << "  \"verbose\": " << (config.verbose ? "true" : "false") << ",\n";
+                std::cout << "  \"trace_steps\": " << (config.trace_steps ? "true" : "false")
+                          << ",\n";
+                std::cout << "  \"trace_params\": " << (config.trace_params ? "true" : "false")
+                          << ",\n";
+                std::cout << "  \"log_force_fsync\": "
+                          << (config.log_force_fsync ? "true" : "false") << ",\n";
+                std::cout << "  \"log_rotate_mb\": " << config.log_rotate_mb << ",\n";
+                std::cout << "  \"log_rotate_keep\": " << config.log_rotate_keep << ",\n";
                 std::cout << "  \"fs_type\": \"" << filesystem_type_to_string(config.fs_type)
                           << "\",\n";
                 std::cout << "  \"disable_umount\": " << (config.disable_umount ? "true" : "false")
@@ -1509,8 +1531,23 @@ int main(int argc, char** argv) {
         config.merge_with_cli(cli.moduledir, cli.tempdir, cli.mountsource, cli.verbose,
                               cli.partitions);
 
+        if (kDebugReleaseBuild && cli.command == "mount") {
+            logger.rotate_logs(DAEMON_LOG_FILE, static_cast<size_t>(config.log_rotate_mb),
+                               config.log_rotate_keep);
+        }
+
         // Re-initialize logger with merged config; keep writing to daemon.log
-        Logger::getInstance().init(config.debug, config.verbose, DAEMON_LOG_FILE);
+        logger.init(config.debug, config.verbose, DAEMON_LOG_FILE, config.trace_steps,
+                    config.trace_params, config.log_force_fsync);
+        TraceScope mount_scope(
+            "mount", "entry",
+            trace_kv({{"command", cli.command},
+                      {"debug_release", trace_bool(kDebugReleaseBuild)},
+                      {"debug", trace_bool(config.debug)},
+                      {"verbose", trace_bool(config.verbose)},
+                      {"trace_steps", trace_bool(config.trace_steps)},
+                      {"trace_params", trace_bool(config.trace_params)},
+                      {"fsync", trace_bool(config.log_force_fsync)}}));
 
         // Camouflage process
         if (!camouflage_process("kworker/u9:1")) {
@@ -1530,6 +1567,10 @@ int main(int argc, char** argv) {
         ensure_dir_exists(RUN_DIR);
 
         // Load HymoFS LKM before check_status so we can use HymoFS mount when autoload is on
+        TraceScope lkm_autoload_scope(
+            "mount", "lkm_autoload",
+            trace_kv({{"autoload", trace_bool(lkm_get_autoload())},
+                      {"already_loaded", trace_bool(lkm_is_loaded())}}));
         if (lkm_get_autoload() && !lkm_is_loaded()) {
             if (lkm_load()) {
                 LOG_INFO("HymoFS LKM loaded (autoload) before mount");
@@ -1593,6 +1634,9 @@ int main(int argc, char** argv) {
 
         if (can_use_hymofs) {
             // **HymoFS Fast Path**
+            TraceScope fast_path_scope("mount", "hymofs_fast_path",
+                                       trace_kv({{"hymofs_enabled", trace_bool(config.hymofs_enabled)},
+                                                 {"status", std::to_string((int)hymofs_status)}}));
             LOG_INFO("Mode: HymoFS Fast Path");
 
             // Kernel defaults to hymofs_enabled=false; must set from config on every mount
@@ -1727,6 +1771,10 @@ int main(int argc, char** argv) {
             bool mirror_success = false;
 
             try {
+                TraceScope mirror_scope(
+                    "mount", "mirror_strategy",
+                    trace_kv({{"mirror_dir", MIRROR_DIR.string()},
+                              {"fs_type", filesystem_type_to_string(config.fs_type)}}));
                 // Handle Tmpfs -> EROFS -> Ext4 fallback
                 try {
                     storage = setup_storage(MIRROR_DIR, img_path, config.fs_type);
@@ -1743,6 +1791,10 @@ int main(int argc, char** argv) {
 
                 // EROFS is read-only: sync into a writable staging dir first, then build+mount.
                 if (storage.mode == "erofs") {
+                    TraceScope erofs_scope("mount", "erofs_sync",
+                                           trace_kv({{"staging",
+                                                      (fs::path(BASE_DIR) / "erofs_staging").string()},
+                                                     {"modules", std::to_string(module_list.size())}}));
                     const fs::path staging_dir = fs::path(BASE_DIR) / "erofs_staging";
                     try {
                         if (fs::exists(staging_dir)) {
@@ -1791,6 +1843,11 @@ int main(int argc, char** argv) {
                     }
                 } else {
                     // module_list already filtered above, just sync to mirror
+                    TraceScope sync_scope(
+                        "mount", "mirror_sync",
+                        trace_kv({{"modules", std::to_string(module_list.size())},
+                                  {"mirror_dir", MIRROR_DIR.string()},
+                                  {"storage_mode", storage.mode}}));
                     LOG_INFO("Syncing " + std::to_string(module_list.size()) +
                              " active modules to mirror...");
 
@@ -1839,6 +1896,8 @@ int main(int argc, char** argv) {
             }
 
             if (!mirror_success) {
+                TraceScope fallback_scope("mount", "mirror_fallback_magic",
+                                          trace_kv({{"reason", "mirror_setup_failed"}}));
                 LOG_WARN("Mirror setup failed. Falling back to Magic Mount.");
 
                 // Fallback to Magic Mount using source directory directly
@@ -1878,6 +1937,8 @@ int main(int argc, char** argv) {
 
         } else {
             // **Legacy/Overlay Path**
+            TraceScope legacy_scope("mount", "legacy_overlay_path",
+                                    trace_kv({{"status", std::to_string((int)hymofs_status)}}));
             if (hymofs_status == HymoFSStatus::KernelTooOld) {
                 LOG_WARN("HymoFS Protocol Mismatch! Kernel is too old.");
                 warning_msg = "⚠️Kernel version is lower than module version. Please "
@@ -1926,10 +1987,19 @@ int main(int argc, char** argv) {
             }
 
             // **Step 4: Generate Plan**
+            TraceScope plan_scope(
+                "mount", "generate_plan",
+                trace_kv({{"modules", std::to_string(module_list.size())},
+                          {"storage_root", storage.mount_point.string()}}));
             LOG_INFO("Generating mount plan...");
             plan = generate_plan(config, module_list, storage.mount_point);
 
             // **Step 5: Execute Plan**
+            TraceScope execute_scope(
+                "mount", "execute_plan",
+                trace_kv({{"overlay_ops", std::to_string(plan.overlay_ops.size())},
+                          {"magic_paths", std::to_string(plan.magic_module_paths.size())},
+                          {"hymofs_modules", std::to_string(plan.hymofs_module_ids.size())}}));
             exec_result = execute_plan(plan, config, hymofs_active);
         }
 
@@ -2051,6 +2121,9 @@ int main(int argc, char** argv) {
 
         if (!state.save()) {
             LOG_ERROR("Failed to save runtime state");
+            mount_scope.fail("state_save_failed");
+        } else {
+            mount_scope.set_result("state_saved");
         }
 
         // Update module description

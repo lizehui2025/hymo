@@ -15,6 +15,11 @@ export const DEFAULT_CONFIG = {
   logfile: PATHS.DEFAULT_LOG,
   debug: false,
   verbose: false,
+  trace_steps: false,
+  trace_params: false,
+  log_force_fsync: false,
+  log_rotate_mb: 16,
+  log_rotate_keep: 8,
   fs_type: "auto",
   disable_umount: false,
   enable_nuke: true,
@@ -424,7 +429,12 @@ const realApi = {
     }
 
     const target = !logPath || logPath === "system" ? PATHS.DEFAULT_LOG : logPath;
-    const result = await exec(`[ -f '${shellEscape(target)}' ] && tail -n ${lines} '${shellEscape(target)}' || echo ""`);
+    const escapedTarget = shellEscape(target);
+    const isDefaultLog = target === PATHS.DEFAULT_LOG;
+    const cmd = isDefaultLog
+      ? `LOG_BASE='${escapedTarget}'; (for i in 8 7 6 5 4 3 2 1; do [ -f "$LOG_BASE.$i" ] && cat "$LOG_BASE.$i"; done; [ -f "$LOG_BASE" ] && cat "$LOG_BASE") | tail -n ${lines}`
+      : `[ -f '${escapedTarget}' ] && tail -n ${lines} '${escapedTarget}' || echo ""`;
+    const result = await exec(cmd);
     if (result.errno === 0) {
       return result.stdout || "";
     }

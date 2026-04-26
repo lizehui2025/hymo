@@ -2,6 +2,7 @@
 #include "utils.hpp"
 #include <fcntl.h>
 #include <linux/loop.h>
+#include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
@@ -10,18 +11,65 @@
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <unistd.h>
+#include <atomic>
+#include <chrono>
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <functional>
+#include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <set>
 #include <sstream>
+#include <thread>
+#include <utility>
 #include <vector>
 #include "defs.hpp"
 
 extern char** environ;
 
 namespace hymo {
+
+namespace {
+
+std::mutex g_log_mutex;
+std::atomic<int> g_signal_log_fd{-1};
+std::atomic<int> g_signal_fatal_fd{-1};
+std::atomic<bool> g_signal_handlers_installed{false};
+std::atomic<bool> g_signal_in_flight{false};
+
+constexpr int kHandledSignals[] = {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE, SIGTERM};
+
+long long steady_ms_since(const std::chrono::steady_clock::time_point& start) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                 start)
+        .count();
+}
+
+void append_uint(char* buf, size_t& idx, size_t cap, unsigned long long value) {
+    char tmp[32];
+    size_t len = 0;
+    do {
+        tmp[len++] = static_cast<char>('0' + (value % 10));
+        value /= 10;
+    } while (value > 0 && len < sizeof(tmp));
+    while (len > 0 && idx + 1 < cap) {
+        buf[idx++] = tmp[--len];
+    }
+}
+
+size_t append_literal(char* buf, size_t idx, size_t cap, const char* lit) {
+    if (!lit) {
+        return idx;
+    }
+    while (*lit != '\0' && idx + 1 < cap) {
+        buf[idx++] = *lit++;
+    }
+    return idx;
+}
+
+}  // namespace
 
 // Logger implementation
 Logger& Logger::getInstance() {
@@ -30,13 +78,41 @@ Logger& Logger::getInstance() {
 }
 
 void Logger::init(bool debug, bool verbose) {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
     debug_ = debug;
     verbose_ = verbose;
 }
 
 void Logger::init(bool debug, bool verbose, const char* log_path) {
+    init(debug, verbose, log_path, trace_steps_, trace_params_, force_fsync_);
+}
+
+void Logger::init(bool debug, bool verbose, const char* log_path, bool trace_steps,
+                  bool trace_params, bool force_fsync) {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
     debug_ = debug;
     verbose_ = verbose;
+    trace_steps_ = trace_steps;
+    trace_params_ = trace_params;
+    force_fsync_ = force_fsync;
+    if (run_id_.empty()) {
+        std::ostringstream oss;
+        const auto now = std::chrono::system_clock::now().time_since_epoch();
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+        oss << ms << "-" << getpid();
+        run_id_ = oss.str();
+    }
+
+    if (log_fd_ >= 0) {
+        close(log_fd_);
+        log_fd_ = -1;
+    }
+    if (log_file_ && log_file_->is_open()) {
+        log_file_->close();
+    }
+    log_file_.reset();
+    log_path_.clear();
+
     if (log_path && *log_path) {
         try {
             fs::path p(log_path);
@@ -49,11 +125,33 @@ void Logger::init(bool debug, bool verbose, const char* log_path) {
             log_file_ = std::make_unique<std::ofstream>(log_path, std::ios::app);
             if (!log_file_->is_open()) {
                 log_file_.reset();
+            } else {
+                log_path_ = log_path;
+                log_fd_ = open(log_path, O_WRONLY | O_APPEND | O_CLOEXEC);
             }
         } catch (...) {
             log_file_.reset();
+            log_fd_ = -1;
+            log_path_.clear();
         }
     }
+    g_signal_log_fd.store(log_fd_);
+    if (!log_path_.empty()) {
+        const std::string fatal_path = std::string(FATAL_LOG_FILE);
+        const int old_fatal_fd = g_signal_fatal_fd.load();
+        if (old_fatal_fd >= 0) {
+            close(old_fatal_fd);
+        }
+        g_signal_fatal_fd.store(open(fatal_path.c_str(), O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC,
+                                     0644));
+    } else {
+        const int old_fatal_fd = g_signal_fatal_fd.load();
+        if (old_fatal_fd >= 0) {
+            close(old_fatal_fd);
+            g_signal_fatal_fd.store(-1);
+        }
+    }
+    install_fatal_signal_handlers();
 }
 
 void Logger::log(const std::string& level, const std::string& message) {
@@ -62,19 +160,276 @@ void Logger::log(const std::string& level, const std::string& message) {
     if (level == "DEBUG" && !debug_)
         return;
 
+    const std::string log_line = format_log_line(level, message, nullptr);
+    write_line(log_line);
+}
+
+void Logger::log_trace(const std::string& level, const std::string& message, const TraceContext& ctx) {
+    if (!trace_steps_ && level == "DEBUG") {
+        return;
+    }
+    if (level == "VERBOSE" && !verbose_) {
+        return;
+    }
+    if (level == "DEBUG" && !debug_) {
+        return;
+    }
+    const std::string log_line = format_log_line(level, message, &ctx);
+    write_line(log_line);
+}
+
+void Logger::set_trace_enabled(bool trace_steps, bool trace_params) {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    trace_steps_ = trace_steps;
+    trace_params_ = trace_params;
+}
+
+bool Logger::trace_steps_enabled() const {
+    return trace_steps_;
+}
+
+bool Logger::trace_params_enabled() const {
+    return trace_params_;
+}
+
+bool Logger::debug_enabled() const {
+    return debug_;
+}
+
+std::string Logger::run_id() const {
+    return run_id_;
+}
+
+std::string Logger::sanitize_field(const std::string& value) {
+    std::string out;
+    out.reserve(value.size());
+    for (char c : value) {
+        switch (c) {
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            out += "\\r";
+            break;
+        case '\t':
+            out += "\\t";
+            break;
+        case '|':
+            out += "\\|";
+            break;
+        default:
+            out.push_back(c);
+            break;
+        }
+    }
+    return out;
+}
+
+std::string Logger::format_log_line(const std::string& level, const std::string& message,
+                                    const TraceContext* ctx) const {
     auto now = std::time(nullptr);
     char time_buf[64];
-    std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+    std::tm tm_now {};
+    localtime_r(&now, &tm_now);
+    std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_now);
 
-    std::string log_line = std::string("[") + time_buf + "] [" + level + "] " + message + "\n";
+    std::ostringstream oss;
+    const auto tid_hash = std::hash<std::thread::id>{}(std::this_thread::get_id());
+    oss << "[" << time_buf << "] "
+        << "[" << level << "] " << sanitize_field(message) << " | run_id=" << sanitize_field(run_id_)
+        << " pid=" << getpid() << " tid=" << tid_hash;
+    if (ctx) {
+        if (!ctx->step.empty()) {
+            oss << " step=" << sanitize_field(ctx->step);
+        }
+        if (!ctx->op.empty()) {
+            oss << " op=" << sanitize_field(ctx->op);
+        }
+        if (!ctx->params.empty() && trace_params_) {
+            oss << " params=" << sanitize_field(ctx->params);
+        }
+        if (!ctx->result.empty()) {
+            oss << " result=" << sanitize_field(ctx->result);
+        }
+        if (ctx->duration_ms >= 0) {
+            oss << " duration_ms=" << ctx->duration_ms;
+        }
+    }
+    oss << "\n";
+    return oss.str();
+}
 
+void Logger::write_line(const std::string& line) {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
     if (log_file_ && log_file_->is_open()) {
-        *log_file_ << log_line;
+        *log_file_ << line;
         log_file_->flush();
+        if (log_fd_ >= 0 && force_fsync_) {
+            fsync(log_fd_);
+        }
+    } else if (log_fd_ >= 0) {
+        (void)write(log_fd_, line.c_str(), line.size());
+        if (force_fsync_) {
+            fsync(log_fd_);
+        }
     } else {
-        std::clog << log_line;
+        std::clog << line;
         std::clog.flush();
     }
+}
+
+void Logger::rotate_logs(const char* log_path, size_t rotate_mb, int keep_files) {
+    if (!log_path || *log_path == '\0' || keep_files < 1 || rotate_mb == 0) {
+        return;
+    }
+    try {
+        const fs::path base(log_path);
+        if (!fs::exists(base) || !fs::is_regular_file(base)) {
+            return;
+        }
+        const uintmax_t limit = rotate_mb * 1024ULL * 1024ULL;
+        const uintmax_t current_size = fs::file_size(base);
+        if (current_size <= limit) {
+            return;
+        }
+        for (int i = keep_files; i >= 1; --i) {
+            const fs::path from = (i == 1) ? base : fs::path(base.string() + "." + std::to_string(i - 1));
+            const fs::path to = fs::path(base.string() + "." + std::to_string(i));
+            if (!fs::exists(from)) {
+                continue;
+            }
+            std::error_code ec;
+            fs::remove(to, ec);
+            ec.clear();
+            fs::rename(from, to, ec);
+        }
+    } catch (...) {
+    }
+}
+
+void Logger::handle_fatal_signal(int sig) {
+    if (g_signal_in_flight.exchange(true)) {
+        _exit(128 + sig);
+    }
+
+    char buf[256];
+    size_t idx = 0;
+    idx = append_literal(buf, idx, sizeof(buf), "[FATAL] signal=");
+    append_uint(buf, idx, sizeof(buf), static_cast<unsigned long long>(sig));
+    idx = append_literal(buf, idx, sizeof(buf), " pid=");
+    append_uint(buf, idx, sizeof(buf), static_cast<unsigned long long>(getpid()));
+    idx = append_literal(buf, idx, sizeof(buf), "\n");
+
+    const int log_fd = g_signal_log_fd.load();
+    const int fatal_fd = g_signal_fatal_fd.load();
+    if (log_fd >= 0) {
+        (void)write(log_fd, buf, idx);
+        fsync(log_fd);
+    }
+    if (fatal_fd >= 0) {
+        (void)write(fatal_fd, buf, idx);
+        fsync(fatal_fd);
+    }
+
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+void Logger::install_fatal_signal_handlers() {
+    if (g_signal_handlers_installed.exchange(true)) {
+        return;
+    }
+    struct sigaction sa {};
+    sa.sa_handler = &Logger::handle_fatal_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESETHAND;
+    for (int sig : kHandledSignals) {
+        sigaction(sig, &sa, nullptr);
+    }
+}
+
+std::string trace_kv(const std::initializer_list<std::pair<std::string, std::string>>& fields) {
+    auto sanitize = [](const std::string& value) {
+        std::string out;
+        out.reserve(value.size());
+        for (char c : value) {
+            switch (c) {
+            case '\n':
+                out += "\\n";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
+            case '|':
+                out += "\\|";
+                break;
+            default:
+                out.push_back(c);
+                break;
+            }
+        }
+        return out;
+    };
+    std::ostringstream oss;
+    bool first = true;
+    for (const auto& kv : fields) {
+        if (!first) {
+            oss << ",";
+        }
+        first = false;
+        oss << kv.first << "=" << sanitize(kv.second);
+    }
+    return oss.str();
+}
+
+std::string trace_path(const fs::path& value) {
+    return value.string();
+}
+
+std::string trace_bool(bool value) {
+    return value ? "true" : "false";
+}
+
+TraceScope::TraceScope(std::string step, std::string op, std::string params)
+    : enabled_(Logger::getInstance().trace_steps_enabled()),
+      step_(std::move(step)),
+      op_(std::move(op)),
+      params_(std::move(params)),
+      start_(std::chrono::steady_clock::now()) {
+    if (!enabled_) {
+        return;
+    }
+    Logger::TraceContext ctx;
+    ctx.step = step_;
+    ctx.op = op_;
+    ctx.params = params_;
+    ctx.result = "BEGIN";
+    Logger::getInstance().log_trace("DEBUG", "TRACE", ctx);
+}
+
+TraceScope::~TraceScope() {
+    if (!enabled_) {
+        return;
+    }
+    Logger::TraceContext ctx;
+    ctx.step = step_;
+    ctx.op = op_;
+    ctx.params = params_;
+    ctx.result = failed_ ? ("FAIL:" + result_) : (result_.empty() ? "END" : result_);
+    ctx.duration_ms = steady_ms_since(start_);
+    Logger::getInstance().log_trace(failed_ ? "ERROR" : "DEBUG", "TRACE", ctx);
+}
+
+void TraceScope::set_result(std::string result) {
+    result_ = std::move(result);
+}
+
+void TraceScope::fail(std::string reason) {
+    failed_ = true;
+    result_ = std::move(reason);
 }
 
 // File system utilities

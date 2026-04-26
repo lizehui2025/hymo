@@ -17,6 +17,7 @@ constexpr const char* RUN_DIR = HYMO_DATA_DIR "/run/";
 constexpr const char* STATE_FILE = HYMO_DATA_DIR "/run/daemon_state.json";
 constexpr const char* MOUNT_STATS_FILE = HYMO_DATA_DIR "/run/mount_stats.json";
 constexpr const char* DAEMON_LOG_FILE = HYMO_DATA_DIR "/daemon.log";
+constexpr const char* FATAL_LOG_FILE = HYMO_DATA_DIR "/daemon.fatal.log";
 constexpr const char* SYSTEM_RW_DIR = HYMO_DATA_DIR "/rw";
 constexpr const char* MODULE_PROP_FILE = HYMO_MODULE_DIR "/module.prop";
 constexpr const char* LKM_KO = HYMO_MODULE_DIR "/hymofs_lkm.ko";
